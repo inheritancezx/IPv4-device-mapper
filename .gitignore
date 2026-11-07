@@ -2,3 +2,5 @@
 .venv/  
 .git/
 .DS_Store
+/tesn
+**.html
