@@ -1,0 +1,46 @@
+#!/usr/bin/env sh
+set -eu
+
+name=${1:-experiment.pcap}
+case "$name" in
+  *[!A-Za-z0-9._-]* | '')
+    echo "capture filename must use letters, numbers, dot, underscore or hyphen" >&2
+    exit 2
+    ;;
+esac
+
+if [ -f /evidence/.capture.pid ]; then
+  echo "a capture is already running" >&2
+  exit 2
+fi
+
+# The workbench deliberately has NET_RAW only.  Retain root in tcpdump and
+# avoid promiscuous mode so the helper works without CAP_SETUID/CAP_NET_ADMIN.
+tcpdump -Z root -p -U -i eth0 -w "/evidence/$name" > /evidence/capture.log 2>&1 &
+pid=$!
+echo "$pid" > /evidence/.capture.pid
+
+# Do not return control until tcpdump has attached to eth0.  Without this,
+# a fast scan may finish before the capture process begins receiving packets.
+attempt=0
+while [ "$attempt" -lt 20 ]; do
+  if grep -q 'listening on eth0' /evidence/capture.log; then
+    break
+  fi
+  if ! kill -0 "$pid" 2>/dev/null; then
+    cat /evidence/capture.log >&2
+    rm -f /evidence/.capture.pid
+    exit 1
+  fi
+  sleep 0.1
+  attempt=$((attempt + 1))
+done
+
+if ! grep -q 'listening on eth0' /evidence/capture.log; then
+  echo "tcpdump did not become ready" >&2
+  kill "$pid" 2>/dev/null || true
+  rm -f /evidence/.capture.pid
+  exit 1
+fi
+
+echo "capturing workbench traffic to /evidence/$name"

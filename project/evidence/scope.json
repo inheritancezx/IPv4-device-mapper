@@ -1,0 +1,14 @@
+{
+  "schema": "wqe7002-recon-scope-v1",
+  "scope_id": "wqe7002-a1-standard-device-map-v1",
+  "option": "device-map",
+  "environment": "isolated-course-lab",
+  "interface": "eth0",
+  "network": "172.28.70.0/28",
+  "authorised_hosts": ["172.28.70.3", "172.28.70.10"],
+  "maximum_rate_pps": 20,
+  "maximum_attempts": 2,
+  "timeout_seconds": 1.5,
+  "capture_point": "workbench eth0; records the authorised scanner vantage point",
+  "topology": "wqe7002-course-lab Compose internal bridge"
+}

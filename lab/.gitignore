@@ -1,0 +1,4 @@
+evidence/*
+!evidence/.gitkeep
+generated/*
+!generated/.gitkeep

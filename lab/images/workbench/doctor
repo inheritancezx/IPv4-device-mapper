@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Check that the local WQE7002 Docker rehearsal topology is intact."""
+
+from __future__ import annotations
+
+import ipaddress
+import socket
+import sys
+
+
+EXPECTED = {
+    "endpoint": "172.28.70.3",
+    "services": "172.28.70.10",
+}
+
+
+def main() -> int:
+    failures: list[str] = []
+    for name, expected in EXPECTED.items():
+        try:
+            observed = socket.gethostbyname(name)
+            if observed != expected:
+                failures.append(f"{name} resolves to {observed}, expected {expected}")
+        except OSError as error:
+            failures.append(f"cannot resolve {name}: {error}")
+
+    try:
+        external = socket.create_connection(("1.1.1.1", 443), timeout=1)
+    except OSError:
+        external = None
+    if external is not None:
+        external.close()
+        failures.append("workbench reached an external address; the internal-lab boundary is not intact")
+
+    try:
+        import scapy  # noqa: F401
+    except ImportError:
+        failures.append("Scapy is not installed")
+
+    try:
+        address = ipaddress.ip_address(socket.gethostbyname("services"))
+        if address not in ipaddress.ip_network("172.28.70.0/28"):
+            failures.append("services is outside the declared rehearsal subnet")
+    except OSError:
+        pass
+
+    if failures:
+        print("COURSE LAB CHECK FAILED")
+        print("\n".join(f"- {item}" for item in failures))
+        return 1
+    print("COURSE LAB CHECK PASSED")
+    print("workbench cannot reach an external address and can resolve the declared lab peers.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

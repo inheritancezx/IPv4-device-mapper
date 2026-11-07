@@ -1,0 +1,45 @@
+name: wqe7002-course-lab
+
+services:
+  workbench:
+    build:
+      context: ./images/workbench
+    hostname: workbench
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+    networks:
+      lab:
+        ipv4_address: 172.28.70.2
+    volumes:
+      - ./scopes:/scopes:ro
+      - ./evidence:/evidence
+    tty: true
+    stdin_open: true
+
+  endpoint:
+    build:
+      context: ./images/endpoint
+    hostname: endpoint
+    networks:
+      lab:
+        ipv4_address: 172.28.70.3
+
+  services:
+    build:
+      context: ./images/services
+    hostname: services
+    networks:
+      lab:
+        ipv4_address: 172.28.70.10
+
+networks:
+  lab:
+    name: ${COMPOSE_PROJECT_NAME:-wqe7002-course-lab}_lab
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.70.0/28
+          gateway: 172.28.70.1

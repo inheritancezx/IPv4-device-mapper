@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+set -eu
+
+service ssh start
+service nginx start
+exec dnsmasq --keep-in-foreground --conf-file=/etc/dnsmasq.d/wqe7002.conf

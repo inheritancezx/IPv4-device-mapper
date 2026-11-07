@@ -1,0 +1,23 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ ! -f /evidence/.capture.pid ]; then
+  echo "no capture is running" >&2
+  exit 2
+fi
+
+pid=$(cat /evidence/.capture.pid)
+# Give libpcap one read interval to deliver a just-completed short scan before
+# interrupting tcpdump.  Longer student experiments naturally exceed this.
+sleep 1
+# SIGINT asks tcpdump to flush and close the PCAP cleanly.  SIGTERM can end a
+# very short capture before libpcap has released its first packet batch.
+kill -INT "$pid" 2>/dev/null || true
+
+attempt=0
+while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 20 ]; do
+  sleep 0.1
+  attempt=$((attempt + 1))
+done
+rm -f /evidence/.capture.pid
+echo "capture stopped"
