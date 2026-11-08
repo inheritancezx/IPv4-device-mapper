@@ -8,79 +8,61 @@ from scapy.all import ARP, Ether, srp
 
 def usage():
     sys.stderr.write(
-        "Usage: scope --scope file --output file "
+        "Usage: mapper --scope file --output file "
         "[--dryrun | --execute] [--rate n] [--attempts n] [--iface name]\n"
     )
     raise SystemExit(1)
 
+def fail(message):
+    sys.stderr.write(f"mapper: {message}\n")
+    return 1
+
+def take_value(args, index, flag):
+    if index >= len(args) or args[index] != flag:
+        usage()
+    index += 1
+    if index >= len(args) or args[index] == "":
+        usage()
+    return args[index], index + 1 
 
 def parse(argv):
     args = list(argv)
-    scope = None
-    output = None
-    dryrun = False
-    execute = False
-    rate = None
-    attempts = None
-    iface = None
     index = 0
 
-    while index < len(args):
-        arg = args[index]
+    scope, index = take_value(args, index, "--scope")
+    output, index = take_value(args, index, "--output")
 
-        if arg in ("--dryrun", "--execute"):
-            if dryrun or execute:
-                usage()
-            dryrun = arg == "--dryrun"
-            execute = arg == "--execute"
-            index += 1
-            continue
-
-        if arg not in ("--scope", "--output", "--rate", "--attempts", "--iface"):
-            usage()
-
-        index += 1
-        if index >= len(args) or args[index] == "":
-            usage()
-
-        value = args[index]
-        if arg == "--scope":
-            if scope is not None:
-                usage()
-            scope = value
-        elif arg == "--output":
-            if output is not None:
-                usage()
-            output = value
-        elif arg == "--rate":
-            if rate is not None:
-                usage()
-            rate = value
-        elif arg == "--attempts":
-            if attempts is not None:
-                usage()
-            attempts = value
-        elif arg == "--iface":
-            if iface is not None:
-                usage()
-            iface = value
-        index += 1
-
-    if scope is None or output is None or (not dryrun and not execute):
+    if index >= len(args) or args[index] not in ("--dryrun", "--execute"):
         usage()
+    dryrun = args[index] == "--dryrun"
+    execute = not dryrun
+    index += 1
 
-    return scope, output, dryrun, execute, rate, attempts, iface
+    # optional flags
+    optional = {"--rate": None, "--attempts": None, "--iface": None}
+    while index < len(args):
+        flag = args[index]
+        if flag not in optional or optional[flag] is not None:
+            usage()  # unknown flag or duplicate
+        optional[flag], index = take_value(args, index, flag)
+
+    return (scope, output, dryrun, execute,
+            optional["--rate"], optional["--attempts"], optional["--iface"])
 
 
-def fail(message):
-    sys.stderr.write(f"scope: {message}\n")
-    return 1
-
+def positive_integer(value, name):
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a positive integer") from error
+    if result < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return result
 
 def load_scope(filename):
     try:
         with open(filename, encoding="utf-8") as file:
-            manifest = json.load(file)
+            data = json.load(file)
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"cannot read scope file: {error}") from error
 
@@ -92,34 +74,53 @@ def load_scope(filename):
         "maximum_rate_pps",
         "maximum_attempts",
     )
-    if any(field not in manifest for field in required):
-        raise ValueError("scope manifest is missing required fields")
-    if manifest["option"] != "device-map":
-        raise ValueError("scope manifest is not for Option A device mapping")
+    for field in required:
+        if field not in data:
+            raise ValueError(f"scope data is missing required field: {field}")
 
     try:
-        network = ipaddress.ip_network(manifest["network"], strict=True)
+        network = ipaddress.ip_network(data["network"], strict=True)
     except ValueError as error:
         raise ValueError("scope network is not a valid CIDR") from error
-
     if network.version != 4 or network.prefixlen < 28:
-        raise ValueError("scope network must be an IPv4 /28 or smaller")
-    if manifest["maximum_rate_pps"] > 20:
-        raise ValueError("scope maximum rate exceeds 20 probes per second")
-    if manifest["maximum_attempts"] > 2:
-        raise ValueError("scope maximum attempts exceeds 2")
+        raise ValueError("network scope must be an IPv4 /28 or smaller")
 
-    return manifest, network
+    data["maximum_rate_pps"] = positive_integer(data["maximum_rate_pps"], "maximum_rate_pps")
+    data["maximum_attempts"] = positive_integer(data["maximum_attempts"], "maximum_attempts")
 
+    if data["maximum_rate_pps"] > 20:
+        raise ValueError("rate exceeds 20 probes per second")
+    if data["maximum_attempts"] > 2:
+        raise ValueError("maximum attempts exceeds 2")
 
-def positive_integer(value, name):
-    try:
-        result = int(value)
-    except (TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be a positive integer") from error
-    if result < 1:
-        raise ValueError(f"{name} must be a positive integer")
-    return result
+    return data, network
+
+def load_args(scope_file, rate_arg, attempts_arg, iface_arg):
+    data, network = load_scope(scope_file)
+
+    if rate_arg is None:
+        rate = data["maximum_rate_pps"]
+    else:
+        rate = positive_integer(rate_arg, "rate")
+
+    if attempts_arg is None:
+        attempts = data["maximum_attempts"]
+    else:
+        attempts = positive_integer(attempts_arg, "attempts")
+
+    if iface_arg is None:
+        iface = data["interface"]
+    else:
+        iface = iface_arg
+
+    if rate > data["maximum_rate_pps"]:
+        raise ValueError("rate exceeds the authorised limit")
+    if attempts > data["maximum_attempts"]:
+        raise ValueError("attempts exceeds the authorised limit")
+    if iface != data["interface"]:
+        raise ValueError("interface does not match the scope data")
+
+    return data, network, iface, rate, attempts
 
 
 def utc_now():
@@ -165,39 +166,16 @@ def execute_device_map(network, iface, rate, attempts, timeout):
     return devices, not_observed
 
 
-def resolve_options(scope_file, rate_arg, attempts_arg, iface_arg):
-    try:
-        manifest, network = load_scope(scope_file)
-        rate = positive_integer(
-            rate_arg or manifest["maximum_rate_pps"], "rate"
-        )
-        attempts = positive_integer(
-            attempts_arg or manifest["maximum_attempts"], "attempts"
-        )
-    except ValueError as error:
-        raise ValueError(str(error)) from error
-
-    iface = iface_arg or manifest["interface"]
-    if rate > 20 or rate > manifest["maximum_rate_pps"]:
-        raise ValueError("rate exceeds the authorised limit")
-    if attempts > 2 or attempts > manifest["maximum_attempts"]:
-        raise ValueError("attempts exceeds the authorised limit")
-    if iface != manifest["interface"]:
-        raise ValueError("interface does not match the scope manifest")
-
-    return manifest, network, iface, rate, attempts
-
-
-def print_dryrun(manifest, network, iface, rate, attempts):
+def print_dryrun(data, network, iface, rate, attempts):
     print("DRY-RUN: no packets will be transmitted")
-    print(f"scope: {manifest['scope_id']}")
+    print(f"scope: {data['scope_id']}")
     print(f"network: {network}")
     print(f"interface: {iface}")
     print(f"rate: {rate} probes per second")
     print(f"attempts: {attempts}")
 
 
-def run_execution(manifest, network, iface, rate, attempts):
+def run_execution(data, network, iface, rate, attempts):
     start = utc_now()
     try:
         devices, not_observed = execute_device_map(
@@ -205,7 +183,7 @@ def run_execution(manifest, network, iface, rate, attempts):
             iface,
             rate,
             attempts,
-            manifest.get("timeout_seconds", 1.5),
+            data.get("timeout_seconds", 1.5),
         )
     except OSError as error:
         raise RuntimeError(f"execution failed: {error}") from error
@@ -213,7 +191,7 @@ def run_execution(manifest, network, iface, rate, attempts):
 
 
 def build_result(
-    manifest,
+    data,
     iface,
     rate,
     attempts,
@@ -224,7 +202,7 @@ def build_result(
 ):
     return {
         "schema": "wqe7002-device-map-result-v1",
-        "scope_id": manifest["scope_id"],
+        "scope_id": data["scope_id"],
         "option": "device-map",
         "utc_start": start,
         "utc_end": end,
@@ -232,7 +210,7 @@ def build_result(
             "interface": iface,
             "rate_pps": rate,
             "attempts": attempts,
-            "timeout_seconds": manifest.get("timeout_seconds", 1.5),
+            "timeout_seconds": data.get("timeout_seconds", 1.5),
         },
         "devices": devices,
         "not_observed": not_observed,
@@ -257,7 +235,7 @@ def main(argv=None):
     )
 
     try:
-        manifest, network, iface, rate, attempts = resolve_options(
+        data, network, iface, rate, attempts = load_args(
             scope_file,
             rate_arg,
             attempts_arg,
@@ -267,12 +245,12 @@ def main(argv=None):
         return fail(str(error))
 
     if dryrun:
-        print_dryrun(manifest, network, iface, rate, attempts)
+        print_dryrun(data, network, iface, rate, attempts)
         return 0
 
     try:
         start, end, devices, not_observed = run_execution(
-            manifest,
+            data,
             network,
             iface,
             rate,
@@ -282,7 +260,7 @@ def main(argv=None):
         return fail(str(error))
 
     result = build_result(
-        manifest,
+        data,
         iface,
         rate,
         attempts,
