@@ -123,57 +123,59 @@ def load_args(scope_file, rate_arg, attempts_arg, iface_arg):
     return data, network, iface, rate, attempts
 
 
-def utc_now():
-    return datetime.now(timezone.utc).isoformat()
-
-
-def execute_device_map(network, iface, rate, attempts, timeout):
-    targets = [str(address) for address in network.hosts()]
-    observations = {}
-    packets = [
-        Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=target)
-        for target in targets
-    ]
-
-    for _ in range(attempts):
-        answered, _ = srp(
-            packets,
-            iface=iface,
-            inter=1.0 / rate,
-            timeout=timeout,
-            verbose=0,
-        )
-
-        for _, response in answered:
-            address = response.psrc
-            if address not in targets:
-                continue
-
-            device = observations.setdefault(
-                address,
-                {
-                    "ip": address,
-                    "mac": response.hwsrc,
-                    "observation_count": 0,
-                    "observation_times": [],
-                },
-            )
-            device["observation_count"] += 1
-            device["observation_times"].append(utc_now())
-
-    devices = sorted(observations.values(), key=lambda item: item["ip"])
-    not_observed = sorted(set(targets) - set(observations))
-    return devices, not_observed
-
-
 def print_dryrun(data, network, iface, rate, attempts):
-    print("DRY-RUN: no packets will be transmitted")
+    print("DRYRUN: no packets will be transmitted")
     print(f"scope: {data['scope_id']}")
     print(f"network: {network}")
     print(f"interface: {iface}")
     print(f"rate: {rate} probes per second")
     print(f"attempts: {attempts}")
 
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def record_reply(observations, reply):
+    address = reply.psrc
+    if address not in observations:
+        observations[address] = {
+            "ip": address,
+            "mac": reply.hwsrc,
+            "obs_count": 0,
+            "obs_times": [],
+        }
+
+    observations[address]["obs_count"] += 1
+    observations[address]["obs_times"].append(utc_now())
+
+def execute_device_map(network, iface, rate, attempts, timeout):
+    targets = [str(address) for address in network.hosts()]
+    target_set = set(targets)  # using unique list
+    observations = {}
+    packets = [
+        Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=target)
+        for target in targets
+    ]
+
+    # knocking
+    for attempt in range(attempts):
+        answered, unanswered = srp(
+            packets, iface=iface, inter=1.0 / rate, timeout=timeout, verbose=0
+        )
+
+        for sent, reply in answered:
+            if reply.psrc in target_set:
+                record_reply(observations, reply)
+
+    # sort the IPs, then build the device list in that order
+    devices = []
+    for ip in sorted(observations, key=ipaddress.ip_address):
+        devices.append(observations[ip])
+
+    not_observed = sorted(target_set - set(observations))
+
+    return devices, not_observed
 
 def run_execution(data, network, iface, rate, attempts):
     start = utc_now()
@@ -188,7 +190,6 @@ def run_execution(data, network, iface, rate, attempts):
     except OSError as error:
         raise RuntimeError(f"execution failed: {error}") from error
     return start, utc_now(), devices, not_observed
-
 
 def build_result(
     data,
@@ -246,36 +247,36 @@ def main(argv=None):
 
     if dryrun:
         print_dryrun(data, network, iface, rate, attempts)
-        return 0
+    else:
+        try:
+            start, end, devices, not_observed = run_execution(
+                data,
+                network,
+                iface,
+                rate,
+                attempts,
+            )
+        except RuntimeError as error:
+            return fail(str(error))
 
-    try:
-        start, end, devices, not_observed = run_execution(
+        result = build_result(
             data,
-            network,
             iface,
             rate,
             attempts,
+            start,
+            end,
+            devices,
+            not_observed,
         )
-    except RuntimeError as error:
-        return fail(str(error))
 
-    result = build_result(
-        data,
-        iface,
-        rate,
-        attempts,
-        start,
-        end,
-        devices,
-        not_observed,
-    )
+        try:
+            write_result(output, result)
+        except OSError as error:
+            return fail(str(error))
 
-    try:
-        write_result(output, result)
-    except OSError as error:
-        return fail(str(error))
+        print(f"wrote {output}")
 
-    print(f"wrote {output}")
     return 0
 
 
