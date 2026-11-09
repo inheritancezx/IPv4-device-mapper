@@ -5,6 +5,16 @@ from datetime import datetime, timezone
 
 from scapy.all import ARP, Ether, srp
 
+TOOL_VERSION = "1.0.0"
+EXPECTED_OPTION = "device-map"
+
+PLACEHOLDER_WORDS = (
+    "tbd", "todo", "changeme", "change_me", "replace", "placeholder",
+    "xxx", "your_", "<", ">", "{{", "}}",
+)
+
+
+### ERROR HANDLING ###
 
 def usage():
     sys.stderr.write(
@@ -16,6 +26,9 @@ def usage():
 def fail(message):
     sys.stderr.write(f"mapper: {message}\n")
     return 1
+
+
+### ARGS & SCOPE FILE PROPERTIES ###
 
 def take_value(args, index, flag):
     if index >= len(args) or args[index] != flag:
@@ -59,6 +72,17 @@ def positive_integer(value, name):
         raise ValueError(f"{name} must be a positive integer")
     return result
 
+def reject_placeholder(value, name):
+    if not isinstance(value, str) or value.strip() == "":
+        raise ValueError(f"{name} must be a non-empty text value")
+    
+    lowered = value.strip().lower()
+
+    for word in PLACEHOLDER_WORDS:
+        if word in lowered:
+            raise ValueError(f"{name} looks like a placeholder: {value!r}")
+
+
 def load_scope(filename):
     try:
         with open(filename, encoding="utf-8") as file:
@@ -77,6 +101,11 @@ def load_scope(filename):
     for field in required:
         if field not in data:
             raise ValueError(f"scope data is missing required field: {field}")
+
+    for field in ("scope_id", "option", "network", "interface"):
+        reject_placeholder(data[field], field)
+    if data["option"] != EXPECTED_OPTION:
+        raise ValueError(f"scope option must be {EXPECTED_OPTION!r}")
 
     try:
         network = ipaddress.ip_network(data["network"], strict=True)
@@ -123,8 +152,11 @@ def load_args(scope_file, rate_arg, attempts_arg, iface_arg):
     return data, network, iface, rate, attempts
 
 
+### DRYRUN OPTION ###
+
 def print_dryrun(data, network, iface, rate, attempts):
     print("DRYRUN: no packets will be transmitted")
+    print(f"tool version: {TOOL_VERSION}")
     print(f"scope: {data['scope_id']}")
     print(f"network: {network}")
     print(f"interface: {iface}")
@@ -132,22 +164,37 @@ def print_dryrun(data, network, iface, rate, attempts):
     print(f"attempts: {attempts}")
 
 
+### EXECUTE OPTION ###
+
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def record_reply(observations, reply):
+def record_reply(observations, reply, attempt):
     address = reply.psrc
     if address not in observations:
         observations[address] = {
             "ip": address,
             "mac": reply.hwsrc,
-            "obs_count": 0,
-            "obs_times": [],
+            "observation_count": 0,
+            "observation_times": [],
+            "attempts_seen": [],
+            "conflicting_macs": [],
         }
 
-    observations[address]["obs_count"] += 1
-    observations[address]["obs_times"].append(utc_now())
+    device = observations[address]
+    if reply.hwsrc != device["mac"] and reply.hwsrc not in device["conflicting_macs"]:
+        device["conflicting_macs"].append(reply.hwsrc)
+        device["conflicting_macs"].sort()
+    device["observation_count"] += 1
+    device["observation_times"].append(utc_now())
+    if attempt not in device["attempts_seen"]:
+        device["attempts_seen"].append(attempt)
+
+
+def is_relevant_reply(reply, target_set):
+    return reply.op == 2 and reply.psrc in target_set
+
 
 def execute_device_map(network, iface, rate, attempts, timeout):
     targets = [str(address) for address in network.hosts()]
@@ -159,14 +206,14 @@ def execute_device_map(network, iface, rate, attempts, timeout):
     ]
 
     # knocking
-    for attempt in range(attempts):
+    for attempt in range(1, attempts + 1):
         answered, unanswered = srp(
             packets, iface=iface, inter=1.0 / rate, timeout=timeout, verbose=0
         )
 
         for sent, reply in answered:
-            if reply.psrc in target_set:
-                record_reply(observations, reply)
+            if is_relevant_reply(reply, target_set):
+                record_reply(observations, reply, attempt)
 
     # sort the IPs, then build the device list in that order
     devices = []
@@ -191,6 +238,28 @@ def run_execution(data, network, iface, rate, attempts):
         raise RuntimeError(f"execution failed: {error}") from error
     return start, utc_now(), devices, not_observed
 
+# extension: retry analysis
+def summarise_retry(devices, not_observed, attempts):
+    targets = len(devices) + len(not_observed)
+
+    found = 0
+    for device in devices:
+        earliest_round = device["attempts_seen"][0]
+        if earliest_round == 1:
+            found += 1
+
+    found_after_retry = len(devices) - found
+    probes_sent = targets * attempts
+
+    return {
+        "targets_probed": targets,
+        "probes_sent": probes_sent,
+        "devices_found": len(devices),
+        "found_on_first_attempt": found,
+        "found_only_after_retry": found_after_retry,
+    }
+
+
 def build_result(
     data,
     iface,
@@ -203,6 +272,7 @@ def build_result(
 ):
     return {
         "schema": "wqe7002-device-map-result-v1",
+        "tool_version": TOOL_VERSION,
         "scope_id": data["scope_id"],
         "option": "device-map",
         "utc_start": start,
@@ -215,6 +285,7 @@ def build_result(
         },
         "devices": devices,
         "not_observed": not_observed,
+        "retry_analysis": summarise_retry(devices, not_observed, attempts),
     }
 
 
