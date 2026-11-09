@@ -178,8 +178,8 @@ def record_reply(observations, reply, attempt):
             "mac": reply.hwsrc,
             "observation_count": 0,
             "observation_times": [],
-            "attempts_seen": [],
             "conflicting_macs": [],
+            "attempts_seen": [],
         }
 
     device = observations[address]
@@ -292,7 +292,7 @@ def build_result(
 def write_result(filename, result):
     try:
         with open(filename, "w", encoding="utf-8") as file:
-            json.dump(result, file, indent=2, sort_keys=True)
+            json.dump(result, file, indent=2)
             file.write("\n")
     except OSError as error:
         raise OSError(f"cannot write result: {error}") from error
